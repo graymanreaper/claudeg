@@ -218,8 +218,18 @@ def settings():
 
 
 # ---------------------------------------------------------------------------
-# JSON API (future mobile/dynamic use)
+# JSON API — used by the Chrome extension and future mobile clients
 # ---------------------------------------------------------------------------
+
+@app.after_request
+def add_cors(response):
+    """Allow the Chrome extension (and any local client) to call /api/* ."""
+    if request.path.startswith('/api/'):
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
 
 @app.route('/api/songs')
 def api_songs():
@@ -233,6 +243,40 @@ def api_song(song_id):
     if not s:
         return jsonify({'error': 'not found'}), 404
     return jsonify(s)
+
+
+@app.route('/api/import', methods=['POST', 'OPTIONS'])
+def api_import():
+    """Accept a pre-scraped tab object from the Chrome extension."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json(silent=True) or {}
+    required = ('url', 'title', 'artist', 'content')
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({'ok': False, 'error': f'missing fields: {", ".join(missing)}'}), 400
+
+    song = {
+        'url':       data['url'],
+        'title':     data['title'].strip(),
+        'artist':    data['artist'].strip(),
+        'tab_type':  data.get('tab_type') or 'Chords',
+        'content':   data['content'],
+        'key':       data.get('key') or '',
+        'capo':      int(data.get('capo') or 0),
+        'rating':    float(data.get('rating') or 0.0),
+        'votes':     int(data.get('votes') or 0),
+    }
+    already = db.song_exists(song['url'])
+    song_id = db.add_song(song)
+    return jsonify({
+        'ok': True,
+        'song_id': song_id,
+        'already_existed': already,
+        'title': song['title'],
+        'artist': song['artist'],
+    })
 
 
 if __name__ == '__main__':

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>🎸 ChordBook</h1>
+  </header>
+
+  <section class="server-row">
+    <label>Server:
+      <input type="text" id="serverUrl" placeholder="http://localhost:5000">
+    </label>
+    <span id="serverStatus" class="dot dot-off" title="Connection status"></span>
+  </section>
+
+  <section id="currentPageSection" class="section">
+    <div id="currentPageInfo" class="page-info muted">Checking current tab…</div>
+    <button id="saveCurrentBtn" class="btn btn-primary" disabled>Save This Page</button>
+  </section>
+
+  <div class="divider">— or bulk import —</div>
+
+  <section class="section">
+    <label class="form-label">Paste UG URLs (one per line):</label>
+    <textarea id="bulkUrls" rows="6" placeholder="https://tabs.ultimate-guitar.com/tab/...
+https://tabs.ultimate-guitar.com/tab/..."></textarea>
+    <button id="bulkBtn" class="btn">Import All</button>
+  </section>
+
+  <section id="logSection" class="section log-section" style="display:none">
+    <div id="progressBar"><div id="progressFill"></div></div>
+    <div id="progressText" class="muted"></div>
+    <ul id="log"></ul>
+  </section>
+
+  <footer>
+    <a id="openLibrary" href="#" target="_blank">Open Library ↗</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

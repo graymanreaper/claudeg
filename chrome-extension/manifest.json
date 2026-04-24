@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "ChordBook Grabber",
+  "version": "1.0.0",
+  "description": "Save Ultimate Guitar tabs and chords to your local ChordBook library.",
+  "permissions": [
+    "scripting",
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://tabs.ultimate-guitar.com/*",
+    "https://www.ultimate-guitar.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "http://192.168.*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Save to ChordBook"
+  }
+}

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Importing… – ChordBook{% endblock %}
+
+{% block content %}
+<div class="bulk-progress-page">
+  <h1>Importing songs…</h1>
+
+  <div class="progress-bar-wrap">
+    <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+  </div>
+  <p class="progress-label" id="progressLabel">Starting…</p>
+
+  <ul class="import-log" id="importLog"></ul>
+
+  <div id="doneMsg" class="done-msg" style="display:none">
+    <p>Import complete.</p>
+    <a href="{{ url_for('index') }}" class="btn">Go to Library</a>
+    <a href="{{ url_for('add_bulk') }}" class="btn btn-sm" style="margin-left:.5rem">Import more</a>
+  </div>
+</div>
+
+<script>
+  const jobId = {{ job_id|tojson }};
+  const statusUrl = `/add/bulk/${jobId}/status`;
+
+  async function poll() {
+    let res, data;
+    try {
+      res = await fetch(statusUrl);
+      data = await res.json();
+    } catch(e) { setTimeout(poll, 2000); return; }
+
+    const pct = data.total ? Math.round(data.done / data.total * 100) : 0;
+    document.getElementById('progressFill').style.width = pct + '%';
+    document.getElementById('progressLabel').textContent =
+      `${data.done} / ${data.total} (${pct}%)`;
+
+    const log = document.getElementById('importLog');
+    log.innerHTML = '';
+    for (const r of [...data.results].reverse()) {
+      const li = document.createElement('li');
+      li.className = 'log-row log-' + r.status;
+      li.textContent = `[${r.status}] ${r.msg}  —  ${r.input}`;
+      log.appendChild(li);
+    }
+
+    if (data.status === 'done') {
+      document.getElementById('doneMsg').style.display = 'block';
+      document.getElementById('progressLabel').textContent =
+        `Done — ${data.total} processed.`;
+    } else {
+      setTimeout(poll, 1500);
+    }
+  }
+
+  poll();
+</script>
+{% endblock %}

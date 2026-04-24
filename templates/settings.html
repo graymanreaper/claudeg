@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Settings – ChordBook{% endblock %}
+
+{% block content %}
+<section class="form-page">
+  <h1>Settings</h1>
+
+  <div class="settings-status">
+    <span class="status-dot {{ 'dot-ok' if cookie_loaded else 'dot-off' }}"></span>
+    {% if cookie_loaded %}
+      UG cookie is active — scraper can access Pro content.
+    {% else %}
+      No cookie loaded — Official/Pro tabs may return 403.
+    {% endif %}
+  </div>
+
+  <h2 class="section-heading">Update UG Cookie</h2>
+  <p class="hint">
+    Paste the raw <code>Cookie</code> header value from a logged-in
+    Ultimate Guitar browser session. It's one long line of key=value pairs.<br><br>
+    <strong>How to get it:</strong><br>
+    1. Log into ultimate-guitar.com in Chrome/Safari/Firefox.<br>
+    2. Open any tab page (e.g. your Deep Satin URL).<br>
+    3. Press <strong>F12</strong> (or long-press → Inspect on some Android browsers).<br>
+    4. Go to the <strong>Network</strong> tab → refresh the page.<br>
+    5. Click the first request in the list.<br>
+    6. Scroll to <strong>Request Headers</strong> → find <code>cookie:</code>.<br>
+    7. Copy the entire value and paste below.
+  </p>
+
+  <form method="post" class="add-form">
+    <label for="cookie">Cookie value</label>
+    <textarea id="cookie" name="cookie" rows="5"
+              placeholder="_ga=GA1.2…; bbsessionhash=…; ug_pro_subscribed=1; cf_clearance=…"
+              required></textarea>
+    <button type="submit" class="btn">Save Cookie</button>
+  </form>
+</section>
+{% endblock %}

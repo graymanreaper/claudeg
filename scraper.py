@@ -40,6 +40,16 @@ if _cookie_header:
     SESSION.headers['Cookie'] = _cookie_header
 
 
+def reload_cookies():
+    """Re-read cookies.txt and update the live session (called from settings page)."""
+    global _cookie_header
+    _cookie_header = _load_cookies()
+    if _cookie_header:
+        SESSION.headers['Cookie'] = _cookie_header
+    else:
+        SESSION.headers.pop('Cookie', None)
+
+
 def _check_403(resp: requests.Response, url: str):
     """Raise a clear error message if UG returned 403."""
     if resp.status_code == 403:

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Bulk Import – ChordBook{% endblock %}
+
+{% block content %}
+<section class="form-page" style="max-width:680px">
+  <h1>Bulk Import</h1>
+  <p class="hint">
+    Paste one entry per line. Two formats are supported:<br>
+    • <strong>URL</strong> — paste a full Ultimate Guitar tab URL<br>
+    • <strong>Song, Artist</strong> — will search UG and pick the best match<br><br>
+    Lines starting with <code>#</code> are ignored.
+    For 100 songs expect ~2–3 minutes total (1 second delay between requests).
+  </p>
+
+  <form method="post" class="add-form">
+    <label for="urls">Songs to import</label>
+    <textarea id="urls" name="urls" rows="18" spellcheck="false"
+              placeholder="https://tabs.ultimate-guitar.com/tab/zach-bryan/deep-satin-official-4963282
+Fast Car, Tracy Chapman
+Blinding Lights, The Weeknd
+# this line is a comment and will be skipped
+https://tabs.ultimate-guitar.com/tab/…"
+              required></textarea>
+    <button type="submit" class="btn">Start Import</button>
+  </form>
+</section>
+{% endblock %}

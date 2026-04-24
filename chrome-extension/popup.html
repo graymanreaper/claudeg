@@ -16,18 +16,32 @@
     <span id="serverStatus" class="dot dot-off" title="Connection status"></span>
   </section>
 
-  <section id="currentPageSection" class="section">
-    <div id="currentPageInfo" class="page-info muted">Checking current tab…</div>
+  <!-- Mode 1: on a UG tab page -->
+  <section id="currentPageSection" class="section" style="display:none">
+    <div id="currentPageInfo" class="page-info muted"></div>
     <button id="saveCurrentBtn" class="btn btn-primary" disabled>Save This Page</button>
   </section>
 
-  <div class="divider">— or bulk import —</div>
+  <!-- Mode 2: on /user/mytabs -->
+  <section id="myTabsSection" class="section" style="display:none">
+    <div id="myTabsInfo" class="page-info ok">Your Saved Tabs page detected.</div>
+    <button id="importMyTabsBtn" class="btn btn-primary">Import All My Saved Tabs</button>
+  </section>
+
+  <!-- Mode 3: anywhere else -->
+  <div id="notOnUgMsg" class="section page-info muted" style="display:none">
+    Navigate to a UG tab page to save it, or to
+    <strong>ultimate-guitar.com/user/mytabs</strong> to import all your saved tabs.
+  </div>
+
+  <div class="divider">— or paste URLs manually —</div>
 
   <section class="section">
-    <label class="form-label">Paste UG URLs (one per line):</label>
-    <textarea id="bulkUrls" rows="6" placeholder="https://tabs.ultimate-guitar.com/tab/...
+    <label class="form-label">UG URLs, one per line:</label>
+    <textarea id="bulkUrls" rows="5"
+      placeholder="https://tabs.ultimate-guitar.com/tab/...
 https://tabs.ultimate-guitar.com/tab/..."></textarea>
-    <button id="bulkBtn" class="btn">Import All</button>
+    <button id="bulkBtn" class="btn">Import from List</button>
   </section>
 
   <section id="logSection" class="section log-section" style="display:none">

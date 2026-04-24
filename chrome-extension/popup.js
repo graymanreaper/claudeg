@@ -1,6 +1,4 @@
 // ChordBook Grabber — popup script
-// Pulls UG tab JSON from the page (or by fetching) and POSTs it to the
-// local Flask server at /api/import.
 
 const $ = (id) => document.getElementById(id);
 
@@ -9,7 +7,7 @@ let currentTab = null;
 let currentTabData = null;
 
 // ---------------------------------------------------------------------------
-// Settings persistence
+// Settings
 // ---------------------------------------------------------------------------
 
 async function loadSettings() {
@@ -33,68 +31,21 @@ async function pingServer() {
   const dot = $('serverStatus');
   try {
     const r = await fetch(serverUrl + '/api/songs', { method: 'GET' });
-    if (r.ok) { dot.className = 'dot dot-ok'; dot.title = 'Server reachable'; }
-    else      { dot.className = 'dot dot-off'; dot.title = 'Server error ' + r.status; }
-  } catch (e) {
+    dot.className = r.ok ? 'dot dot-ok' : 'dot dot-off';
+    dot.title = r.ok ? 'Server reachable' : 'Server error ' + r.status;
+  } catch {
     dot.className = 'dot dot-off';
-    dot.title = 'Server unreachable — is python app.py running?';
+    dot.title = 'Server not reachable — is python app.py running?';
   }
 }
 
 // ---------------------------------------------------------------------------
-// Scrape helpers
+// JSON extraction helpers
 // ---------------------------------------------------------------------------
 
-/** Extract & normalise tab data from the raw window.UGAPP.store.page.data object. */
-function normaliseTabData(data, urlFallback) {
-  const tab = data?.tab;
-  const view = data?.tab_view;
-  const content = view?.wiki_tab?.content;
-  if (!content) throw new Error('No chord/tab content found on this page.');
-
-  return {
-    url:      tab?.tab_url || urlFallback,
-    title:    (tab?.song_name || '').trim(),
-    artist:   (tab?.artist_name || '').trim(),
-    tab_type: tab?.type_name || 'Chords',
-    content:  content,
-    key:      view?.meta?.tonality || '',
-    capo:     view?.meta?.capo || 0,
-    rating:   tab?.rating || 0,
-    votes:    tab?.votes || 0,
-  };
-}
-
-/** Given raw HTML from a UG page, extract the window.UGAPP.store.page.data JSON. */
-function parseTabDataFromHtml(html) {
-  const marker = 'window.UGAPP.store.page.data = ';
-  const start = html.indexOf(marker);
-  if (start === -1) throw new Error('UGAPP data block not found in page');
-
-  let i = start + marker.length;
-  while (i < html.length && html[i] !== '{') i++;
-  if (i >= html.length) throw new Error('JSON start not found');
-
-  const jsonStart = i;
-  let depth = 0, inString = false, escape = false;
-  for (; i < html.length; i++) {
-    const c = html[i];
-    if (escape) { escape = false; continue; }
-    if (c === '\\') { escape = true; continue; }
-    if (c === '"') { inString = !inString; continue; }
-    if (inString) continue;
-    if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (depth === 0) return JSON.parse(html.substring(jsonStart, i + 1));
-    }
-  }
-  throw new Error('Unterminated JSON in page');
-}
-
-/** Pull the page data from the currently active tab's own window.UGAPP object. */
-async function readCurrentPageData(tabId) {
-  const results = await chrome.scripting.executeScript({
+/** Read window.UGAPP.store.page.data directly from a live page. */
+async function readLivePageData(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
     func: () => {
@@ -102,23 +53,118 @@ async function readCurrentPageData(tabId) {
       return d ? JSON.parse(JSON.stringify(d)) : null;
     },
   });
-  return results[0]?.result || null;
+  return result;
 }
 
-/** Fetch a UG URL using the browser's session cookies and extract its data. */
-async function fetchAndParse(url) {
+/** Extract the UGAPP JSON blob from raw HTML (brace-balanced parser). */
+function parseDataFromHtml(html) {
+  const marker = 'window.UGAPP.store.page.data = ';
+  const start = html.indexOf(marker);
+  if (start === -1) throw new Error('UGAPP data not found in page');
+  let i = start + marker.length;
+  while (i < html.length && html[i] !== '{') i++;
+  const jsonStart = i;
+  let depth = 0, inStr = false, esc = false;
+  for (; i < html.length; i++) {
+    const c = html[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) {
+      return JSON.parse(html.substring(jsonStart, i + 1));
+    }
+  }
+  throw new Error('Could not parse UGAPP JSON');
+}
+
+/** Fetch a UG URL using the browser's own session cookies. */
+async function fetchUgPage(url) {
   const resp = await fetch(url, { credentials: 'include' });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const html = await resp.text();
-  return parseTabDataFromHtml(html);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} — ${url}`);
+  return parseDataFromHtml(await resp.text());
 }
 
-/** POST a tab object to the ChordBook server. */
-async function postToServer(tab) {
+// ---------------------------------------------------------------------------
+// Tab-data normaliser (for individual tab pages)
+// ---------------------------------------------------------------------------
+
+function normaliseTabData(data, urlFallback) {
+  const tab = data?.tab;
+  const view = data?.tab_view;
+  const content = view?.wiki_tab?.content;
+  if (!content) throw new Error('No chord/tab content on this page');
+  return {
+    url:      tab?.tab_url || urlFallback,
+    title:    (tab?.song_name   || '').trim(),
+    artist:   (tab?.artist_name || '').trim(),
+    tab_type: tab?.type_name    || 'Chords',
+    content,
+    key:    view?.meta?.tonality || '',
+    capo:   view?.meta?.capo    || 0,
+    rating: tab?.rating         || 0,
+    votes:  tab?.votes          || 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// My Saved Tabs — URL extraction + pagination
+// ---------------------------------------------------------------------------
+
+/** Pull tab URLs out of a /user/mytabs page-data object (handles several layouts). */
+function extractTabUrlsFromPageData(data) {
+  // UG embeds saved-tab lists under various keys — try the most common ones
+  const candidates = [
+    data?.data?.tabs,
+    data?.tabs,
+    data?.user_tabs,
+    data?.data?.user_data?.tabs,
+  ];
+  for (const arr of candidates) {
+    if (Array.isArray(arr) && arr.length > 0) {
+      return arr
+        .map(t => t.tab_url || t.tabUrl || t.url)
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
+/** Collect saved-tab URLs across all pagination pages. */
+async function getAllMyTabUrls(currentTabId) {
+  // Page 1 comes from the already-loaded browser tab (faster, avoids refetch)
+  const firstData = await readLivePageData(currentTabId);
+  if (!firstData) throw new Error('Could not read page data — try refreshing the tab');
+
+  const allUrls = extractTabUrlsFromPageData(firstData);
+
+  // Pagination: try common key paths
+  const pagination = firstData?.pagination
+                  || firstData?.data?.pagination;
+  const totalPages = pagination?.total ?? pagination?.last_page ?? 1;
+
+  for (let page = 2; page <= totalPages; page++) {
+    setProgress(0, 0, `Loading page ${page} of ${totalPages}…`);
+    const data = await fetchUgPage(
+      `https://www.ultimate-guitar.com/user/mytabs?page=${page}`
+    );
+    allUrls.push(...extractTabUrlsFromPageData(data));
+    await delay(400);
+  }
+
+  return allUrls;
+}
+
+// ---------------------------------------------------------------------------
+// POST to local server
+// ---------------------------------------------------------------------------
+
+async function postToServer(tabObj) {
   const resp = await fetch(serverUrl + '/api/import', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(tab),
+    body: JSON.stringify(tabObj),
   });
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok || !body.ok) throw new Error(body.error || `HTTP ${resp.status}`);
@@ -126,31 +172,72 @@ async function postToServer(tab) {
 }
 
 // ---------------------------------------------------------------------------
-// Current-tab flow
+// Progress UI
 // ---------------------------------------------------------------------------
 
-async function setupCurrentTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  currentTab = tab;
-  const info = $('currentPageInfo');
-  const btn = $('saveCurrentBtn');
+function setProgress(done, total, label) {
+  $('logSection').style.display = 'block';
+  const pct = total ? Math.round(done / total * 100) : 0;
+  $('progressFill').style.width = pct + '%';
+  $('progressText').textContent = label || `${done} / ${total}`;
+}
 
-  if (!tab?.url?.includes('ultimate-guitar.com/tab/')) {
-    info.textContent = 'Not on a UG tab page. Navigate to any tab URL to enable single-page save.';
-    btn.disabled = true;
-    return;
+function appendLog(status, msg) {
+  const li = document.createElement('li');
+  li.className = 'log-' + status;
+  li.textContent = `[${status}] ${msg}`;
+  $('log').insertBefore(li, $('log').firstChild);
+}
+
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// Import a list of tab URLs
+// ---------------------------------------------------------------------------
+
+async function importUrls(urls, { disableBtn, btnEl }) {
+  $('log').innerHTML = '';
+  $('logSection').style.display = 'block';
+  if (btnEl) { btnEl.disabled = true; disableBtn && (btnEl.textContent = 'Importing…'); }
+
+  let done = 0;
+  for (const url of urls) {
+    setProgress(done, urls.length);
+    try {
+      const data  = await fetchUgPage(url);
+      const tab   = normaliseTabData(data, url);
+      const result = await postToServer(tab);
+      appendLog(result.already_existed ? 'skip' : 'ok',
+                `${tab.title} — ${tab.artist}`);
+    } catch (e) {
+      appendLog('fail', `${e.message}  [${url}]`);
+    }
+    done++;
+    await delay(600);
   }
 
+  setProgress(done, urls.length, `Done — ${done} tab${done !== 1 ? 's' : ''} processed.`);
+  if (btnEl) { btnEl.disabled = false; btnEl.textContent = btnEl.dataset.label; }
+}
+
+// ---------------------------------------------------------------------------
+// Mode: single UG tab page
+// ---------------------------------------------------------------------------
+
+async function setupSingleTabMode(tab) {
+  $('currentPageSection').style.display = 'block';
+  const info = $('currentPageInfo');
+  const btn  = $('saveCurrentBtn');
+
   try {
-    const raw = await readCurrentPageData(tab.id);
-    if (!raw) throw new Error('page data not loaded yet — refresh the tab');
+    const raw = await readLivePageData(tab.id);
+    if (!raw) throw new Error('page not fully loaded — refresh and try again');
     currentTabData = normaliseTabData(raw, tab.url);
     info.classList.add('ok');
     info.innerHTML = `<strong>${currentTabData.title}</strong><br>${currentTabData.artist}`;
     btn.disabled = false;
   } catch (e) {
-    info.textContent = 'Could not read page data: ' + e.message;
-    btn.disabled = true;
+    info.textContent = 'Could not read page: ' + e.message;
   }
 }
 
@@ -160,75 +247,107 @@ async function saveCurrentPage() {
   btn.textContent = 'Saving…';
   try {
     const result = await postToServer(currentTabData);
-    btn.textContent = result.already_existed ? 'Updated ✓' : 'Saved ✓';
-    setTimeout(() => { btn.textContent = 'Save This Page'; btn.disabled = false; }, 1500);
+    btn.textContent = result.already_existed ? 'Already saved ✓' : 'Saved ✓';
   } catch (e) {
-    btn.textContent = 'Failed — ' + e.message;
-    setTimeout(() => { btn.textContent = 'Save This Page'; btn.disabled = false; }, 3000);
+    btn.textContent = 'Error — ' + e.message;
+  }
+  setTimeout(() => { btn.textContent = 'Save This Page'; btn.disabled = false; }, 2000);
+}
+
+// ---------------------------------------------------------------------------
+// Mode: /user/mytabs page
+// ---------------------------------------------------------------------------
+
+async function setupMyTabsMode(tab) {
+  $('myTabsSection').style.display = 'block';
+  const info = $('myTabsInfo');
+
+  // Peek at page count without blocking the UI
+  try {
+    const data = await readLivePageData(tab.id);
+    const urls = extractTabUrlsFromPageData(data);
+    const pagination = data?.pagination || data?.data?.pagination;
+    const totalPages = pagination?.total ?? pagination?.last_page ?? 1;
+    const perPage = urls.length;
+    const estTotal = totalPages > 1
+      ? `~${perPage * (totalPages - 1) + urls.length}` // rough until all pages loaded
+      : String(urls.length);
+    info.textContent = `Found ${estTotal} saved tabs across ${totalPages} page${totalPages !== 1 ? 's' : ''}.`;
+    if (urls.length === 0) {
+      info.textContent = 'Could not read tab list from this page. Try refreshing.';
+      $('importMyTabsBtn').disabled = true;
+    }
+  } catch (e) {
+    info.textContent = 'Error reading page: ' + e.message;
+    $('importMyTabsBtn').disabled = true;
+  }
+}
+
+async function importMyTabs() {
+  const btn = $('importMyTabsBtn');
+  btn.disabled = true;
+  btn.textContent = 'Collecting URLs…';
+  $('myTabsInfo').textContent = 'Scanning all pages…';
+
+  try {
+    const urls = await getAllMyTabUrls(currentTab.id);
+    $('myTabsInfo').textContent = `Found ${urls.length} tabs — importing…`;
+    await importUrls(urls, { disableBtn: true, btnEl: btn });
+    btn.dataset.label = 'Import All My Saved Tabs';
+  } catch (e) {
+    appendLog('fail', e.message);
+    btn.disabled = false;
+    btn.textContent = 'Import All My Saved Tabs';
   }
 }
 
 // ---------------------------------------------------------------------------
-// Bulk import flow
+// Mode: bulk URL textarea
 // ---------------------------------------------------------------------------
-
-function appendLog(status, msg) {
-  const li = document.createElement('li');
-  li.className = 'log-' + status;
-  li.textContent = `[${status}] ${msg}`;
-  $('log').insertBefore(li, $('log').firstChild);
-}
 
 async function bulkImport() {
-  const raw = $('bulkUrls').value;
-  const lines = raw.split('\n').map(s => s.trim()).filter(s => s && !s.startsWith('#'));
+  const lines = $('bulkUrls').value
+    .split('\n')
+    .map(s => s.trim())
+    .filter(s => s && !s.startsWith('#') && s.startsWith('http'));
   if (!lines.length) return;
-
-  $('logSection').style.display = 'block';
-  $('log').innerHTML = '';
-  $('bulkBtn').disabled = true;
-  $('bulkBtn').textContent = 'Importing…';
-
-  let done = 0;
-  const total = lines.length;
-  const updateProgress = () => {
-    $('progressFill').style.width = Math.round(done / total * 100) + '%';
-    $('progressText').textContent = `${done} / ${total}`;
-  };
-  updateProgress();
-
-  for (const line of lines) {
-    try {
-      const raw = await fetchAndParse(line);
-      const tab = normaliseTabData(raw, line);
-      const result = await postToServer(tab);
-      appendLog(result.already_existed ? 'skip' : 'ok',
-                `${tab.title} — ${tab.artist}`);
-    } catch (e) {
-      appendLog('fail', `${line}  →  ${e.message}`);
-    }
-    done++;
-    updateProgress();
-    // small delay — be polite to UG even though it's our own browser
-    await new Promise(r => setTimeout(r, 400));
-  }
-
-  $('bulkBtn').disabled = false;
-  $('bulkBtn').textContent = 'Import All';
-  $('progressText').textContent = `Done — ${done} processed.`;
+  const btn = $('bulkBtn');
+  btn.dataset.label = btn.textContent;
+  await importUrls(lines, { disableBtn: true, btnEl: btn });
 }
 
 // ---------------------------------------------------------------------------
-// Wire up
+// Detect which page type is active and show the right section
+// ---------------------------------------------------------------------------
+
+async function detectPage() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  currentTab = tab;
+  const url = tab?.url || '';
+
+  if (url.includes('ultimate-guitar.com/user/mytabs')) {
+    setupMyTabsMode(tab);
+  } else if (url.includes('ultimate-guitar.com/tab/') ||
+             url.includes('ultimate-guitar.com/tabs/')) {
+    setupSingleTabMode(tab);
+  } else {
+    $('notOnUgMsg').style.display = 'block';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Init
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   $('openLibrary').href = serverUrl + '/';
   pingServer();
-  setupCurrentTab();
+  detectPage();
 
   $('serverUrl').addEventListener('change', saveServerUrl);
   $('saveCurrentBtn').addEventListener('click', saveCurrentPage);
+  $('importMyTabsBtn').addEventListener('click', importMyTabs);
+  $('bulkBtn').dataset.label = $('bulkBtn').textContent;
   $('bulkBtn').addEventListener('click', bulkImport);
 });

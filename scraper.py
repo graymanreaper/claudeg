@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from pathlib import Path
 import requests
 from urllib.parse import quote_plus
 
@@ -12,10 +13,46 @@ HEADERS = {
     'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
 }
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+COOKIES_FILE = Path(__file__).parent / 'cookies.txt'
+
+
+def _load_cookies() -> str | None:
+    """Read a raw Cookie header value from cookies.txt (gitignored)."""
+    if not COOKIES_FILE.exists():
+        return None
+    raw = COOKIES_FILE.read_text(encoding='utf-8').strip()
+    # Strip comment lines starting with #
+    lines = [ln for ln in raw.splitlines() if ln and not ln.lstrip().startswith('#')]
+    return ' '.join(lines).strip() or None
+
+
+_cookie_header = _load_cookies()
+if _cookie_header:
+    SESSION.headers['Cookie'] = _cookie_header
+
+
+def _check_403(resp: requests.Response, url: str):
+    """Raise a clear error message if UG returned 403."""
+    if resp.status_code == 403:
+        if _cookie_header:
+            raise PermissionError(
+                f"403 Forbidden for {url}. Your cookies in cookies.txt may have "
+                "expired — log into ultimate-guitar.com again and refresh the file."
+            )
+        raise PermissionError(
+            f"403 Forbidden for {url}. This tab requires a UG Pro account or is "
+            "blocked by Cloudflare. Create cookies.txt with your logged-in browser "
+            "cookies (see cookies.txt.example)."
+        )
 
 
 def _extract_page_data(html: str) -> dict | None:
@@ -40,6 +77,7 @@ def fetch_tab_by_url(url: str) -> dict:
     Raises ValueError if the page can't be parsed.
     """
     resp = SESSION.get(url, timeout=15)
+    _check_403(resp, url)
     resp.raise_for_status()
 
     data = _extract_page_data(resp.text)
@@ -84,6 +122,7 @@ def search_tabs(song_name: str, artist_name: str = '', preferred_type: str = 'Ch
 
     try:
         resp = SESSION.get(search_url, timeout=15)
+        _check_403(resp, search_url)
         resp.raise_for_status()
     except requests.RequestException as exc:
         raise ConnectionError(f"Search request failed: {exc}") from exc

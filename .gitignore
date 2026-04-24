@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 songs.db
 .env
+cookies.txt

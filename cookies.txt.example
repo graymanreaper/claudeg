@@ -1,0 +1,24 @@
+# cookies.txt — paste your Ultimate Guitar Cookie header here.
+# This file is git-ignored so your session stays private.
+#
+# HOW TO GET IT (Chrome / Edge / Brave / Firefox — same steps):
+#
+# 1. Log in at https://www.ultimate-guitar.com in your normal browser.
+# 2. Visit any tab page (e.g. the Deep Satin URL).
+# 3. Press F12 to open DevTools.
+# 4. Click the "Network" tab.
+# 5. Press F5 to reload the page.
+# 6. In the request list (left side), click the first row — it's usually
+#    the page itself (e.g. "deep-satin-official-4963282").
+# 7. In the right pane, scroll to "Request Headers".
+# 8. Find the line that starts with `cookie:` (or `Cookie:`).
+# 9. Right-click the cookie value and "Copy value".
+# 10. Paste it into THIS file, replacing everything below this comment block.
+#
+# It will be one long line that looks like:
+#   _ga=GA1.2.123; bbsessionhash=abc; ug_pro_subscribed=1; cf_clearance=xyz; ...
+#
+# Save the file as `cookies.txt` (drop the `.example` suffix), then restart
+# the Flask server.
+#
+# When the cookie expires (typically a few weeks), just repeat the steps.

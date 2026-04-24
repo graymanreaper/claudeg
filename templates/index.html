@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Library – ChordBook{% endblock %}
+
+{% block content %}
+<section class="page-header">
+  <h1>Your Library</h1>
+  <form class="search-bar" method="get" action="{{ url_for('index') }}">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search songs or artists…" autofocus>
+    <button type="submit">Search</button>
+    {% if q %}<a href="{{ url_for('index') }}" class="btn-clear">✕ Clear</a>{% endif %}
+  </form>
+</section>
+
+{% if songs %}
+  <ul class="song-list">
+    {% for s in songs %}
+    <li class="song-card">
+      <a class="song-link" href="{{ url_for('song', song_id=s.id) }}">
+        <span class="song-title">{{ s.title }}</span>
+        <span class="song-artist">{{ s.artist }}</span>
+      </a>
+      <div class="song-meta">
+        {% if s.key %}<span class="badge">Key: {{ s.key }}</span>{% endif %}
+        {% if s.capo %}<span class="badge">Capo {{ s.capo }}</span>{% endif %}
+        <span class="badge badge-type">{{ s.tab_type }}</span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="empty-state">
+    {% if q %}
+      <p>No songs match <strong>{{ q }}</strong>.</p>
+    {% else %}
+      <p>Your library is empty.</p>
+      <p>
+        <a href="{{ url_for('add_by_url') }}" class="btn">Add by URL</a>
+        <a href="{{ url_for('add_by_search') }}" class="btn">Search Ultimate Guitar</a>
+      </p>
+    {% endif %}
+  </div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Add by URL – ChordBook{% endblock %}
+
+{% block content %}
+<section class="form-page">
+  <h1>Add tab by URL</h1>
+  <p class="hint">Paste any Ultimate Guitar tab or chords URL, e.g.<br>
+    <code>https://tabs.ultimate-guitar.com/tab/zach-bryan/deep-satin-official-4963282</code>
+  </p>
+
+  <form method="post" class="add-form">
+    <label for="url">Ultimate Guitar URL</label>
+    <input type="url" id="url" name="url" placeholder="https://tabs.ultimate-guitar.com/…"
+           required autofocus>
+    <button type="submit" class="btn">Fetch &amp; Save</button>
+  </form>
+
+  <p class="alt-link">
+    Don't have the URL? <a href="{{ url_for('add_by_search') }}">Search by song name</a>.
+  </p>
+</section>
+{% endblock %}

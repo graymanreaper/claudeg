@@ -1,0 +1,10 @@
+# Song title, Artist, (optional) direct UG URL
+# Lines starting with # are ignored.
+#
+# Example with URL (most reliable):
+Deep Satin,Zach Bryan,https://tabs.ultimate-guitar.com/tab/zach-bryan/deep-satin-official-4963282
+#
+# Example without URL (will search UG):
+# Fast Car,Tracy Chapman
+# Blinding Lights,The Weeknd
+# Add your songs below:

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}ChordBook{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <a href="{{ url_for('index') }}" class="logo">🎸 ChordBook</a>
+      <nav class="header-nav">
+        <a href="{{ url_for('index') }}">Library</a>
+        <a href="{{ url_for('add_by_url') }}">+ URL</a>
+        <a href="{{ url_for('add_by_search') }}">+ Search</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="main-content">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-container">
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    Chord data fetched from <a href="https://www.ultimate-guitar.com" target="_blank">Ultimate Guitar</a>
+  </footer>
+</body>
+</html>

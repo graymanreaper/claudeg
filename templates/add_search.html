@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Search – ChordBook{% endblock %}
+
+{% block content %}
+<section class="form-page">
+  <h1>Search Ultimate Guitar</h1>
+
+  <form method="post" class="add-form">
+    <label for="song">Song name</label>
+    <input type="text" id="song" name="song"
+           value="{{ request.form.get('song', '') }}"
+           placeholder="Deep Satin" required autofocus>
+
+    <label for="artist">Artist <small>(optional but recommended)</small></label>
+    <input type="text" id="artist" name="artist"
+           value="{{ request.form.get('artist', '') }}"
+           placeholder="Zach Bryan">
+
+    <button type="submit" class="btn">Search</button>
+  </form>
+
+  <p class="alt-link">
+    Already have the URL? <a href="{{ url_for('add_by_url') }}">Add by URL</a>.
+  </p>
+</section>
+
+{% if results is not none %}
+  {% if results %}
+  <section class="results-section">
+    <h2>Results</h2>
+    <ul class="results-list">
+      {% for r in results %}
+      <li class="result-card">
+        <div class="result-info">
+          <strong>{{ r.title }}</strong> — {{ r.artist }}
+          <span class="badge badge-type">{{ r.tab_type }}</span>
+          {% if r.rating %}<span class="badge">★ {{ "%.1f"|format(r.rating) }}</span>{% endif %}
+        </div>
+        <form method="post" action="{{ url_for('fetch_and_add') }}">
+          <input type="hidden" name="url" value="{{ r.url }}">
+          <button type="submit" class="btn btn-sm">Add</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+{% endif %}
+{% endblock %}

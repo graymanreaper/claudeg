@@ -341,21 +341,6 @@ async function inspectOfficialTab(tabId) {
       const d = window.UGAPP?.store?.page?.data;
       if (!d) return { error: 'no UGAPP', currentUrl: location.href };
       const tv = d.tab_view;
-      // Sniff every candidate content field anywhere under tab_view
-      const sniff = {};
-      function walk(o, path, depth) {
-        if (!o || depth > 4 || typeof o !== 'object') return;
-        for (const [k, v] of Object.entries(o)) {
-          if (typeof v === 'string' && v.length > 80 &&
-              (/\[ch\]|\[tab\]|\[Verse|\[Chorus|\[Intro/i.test(v))) {
-            sniff[`${path}.${k}`] = v.length;
-          } else if (typeof v === 'object') {
-            walk(v, path + '.' + k, depth + 1);
-          }
-        }
-      }
-      if (tv) walk(tv, 'tab_view', 0);
-
       return {
         currentUrl:      location.href,
         wikiLen:         tv?.wiki_tab?.content?.length ?? 0,
@@ -368,7 +353,6 @@ async function inspectOfficialTab(tabId) {
         bestProTabUrl:   d?.best_pro_tab_url  ?? null,
         songName:        d?.tab?.song_name    ?? '',
         artistName:      d?.tab?.artist_name  ?? '',
-        chordContentFields: sniff,
       };
     },
   });
@@ -400,6 +384,72 @@ function findChordsUrlInData(info) {
 }
 
 /**
+ * Poll window.UGAPP until wiki_tab.content appears (content loads async for official tabs).
+ */
+async function pollForWikiContent(tabId, maxMs = 10000) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    await delay(600);
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        const d = window.UGAPP?.store?.page?.data;
+        return d?.tab_view?.wiki_tab?.content ? JSON.parse(JSON.stringify(d)) : null;
+      },
+    });
+    if (result) return result;
+  }
+  return null;
+}
+
+/**
+ * UG official chords pages load content via React API — UGAPP is never updated.
+ * This extracts chord/lyric text directly from the rendered DOM as a last resort.
+ */
+async function extractContentFromDom(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: () => {
+      const d = window.UGAPP?.store?.page?.data;
+      const tab = d?.tab;
+
+      // Score candidate elements: prefer pre elements, then text-rich divs
+      const candidates = [];
+      document.querySelectorAll('pre').forEach(el => {
+        if (el.innerText.length > 100) candidates.push({ el, score: el.innerText.length * 2 });
+      });
+      for (const el of document.querySelectorAll('div[class]')) {
+        const text = el.innerText || '';
+        const lines = text.split('\n').filter(l => l.trim()).length;
+        if (text.length < 400 || lines < 8 || el.children.length >= 30) continue;
+        const chordCount = (text.match(/\b[A-G][#b]?(?:m|maj|min|dim|aug|sus|add)?\d*(?:\/[A-G][#b]?)?\b/g) || []).length;
+        candidates.push({ el, score: lines + chordCount * 3 });
+      }
+      if (!candidates.length) return null;
+
+      candidates.sort((a, b) => b.score - a.score);
+      const content = candidates[0].el.innerText;
+      if (!content || content.length < 100) return null;
+
+      return {
+        tab: {
+          song_name:   tab?.song_name   || document.title.replace(/ (Chords|Tab).*$/i, '').trim(),
+          artist_name: tab?.artist_name || '',
+          tab_url:     tab?.tab_url     || location.href.split('?')[0],
+          type_name:   tab?.type_name   || 'Chords',
+          rating: tab?.rating || 0,
+          votes:  tab?.votes  || 0,
+        },
+        tab_view: { wiki_tab: { content }, meta: {} },
+      };
+    },
+  });
+  return result;
+}
+
+/**
  * Click the Chords aria toggle, then wait for either:
  *  (a) wiki_tab.content to appear in UGAPP (in-page React update), OR
  *  (b) the tab URL to change to a chords page (full navigation)
@@ -411,7 +461,6 @@ async function clickChordsAndWait(tabId) {
     target: { tabId },
     world: 'MAIN',
     func: () => {
-      // Try every plausible selector for the Chords toggle
       const candidates = [
         document.querySelector('[aria-label="Chords"]'),
         document.querySelector('[aria-label="Chords"] span'),
@@ -423,7 +472,6 @@ async function clickChordsAndWait(tabId) {
       if (!candidates.length) return null;
 
       const el = candidates[0];
-      // Dispatch a full synthetic mouse-event sequence (React needs bubbling events)
       ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t =>
         el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, composed: true }))
       );
@@ -433,7 +481,6 @@ async function clickChordsAndWait(tabId) {
 
   if (!clicked) return { data: null, clicked: false };
 
-  // Give React / navigation time to start
   await delay(1500);
 
   // Case A: URL changed — real navigation happened
@@ -465,7 +512,7 @@ async function clickChordsAndWait(tabId) {
     if (data) return { data, clicked: true };
   }
 
-  return { data: null, clicked: true }; // click worked but content never appeared
+  return { data: null, clicked: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -487,34 +534,46 @@ async function importUrls(urls, { btnEl } = {}) {
       // Official tabs have no wiki_tab.content — find/load the Chords version
       if (!data?.tab_view?.wiki_tab?.content) {
         const info = await inspectOfficialTab(_scrapeTabId);
-        let info2 = null;
 
-        // Strategy 1: URL redirect via type_urls or simplifiedUrl
+        // Strategy 1: Navigate to the chords URL from type_urls / simplifiedUrl.
+        // Close the current tab first so we get a fresh HTTP request instead of
+        // SPA client-side routing (which never updates window.UGAPP).
         const chordsUrl = findChordsUrlInData(info);
         if (chordsUrl && chordsUrl !== url) {
+          await closeScrapeTab();
           data     = await scrapeViaRealTab(chordsUrl);
           finalUrl = chordsUrl;
+
+          // Content may load asynchronously into UGAPP — poll for up to 10 s
           if (!data?.tab_view?.wiki_tab?.content) {
-            // Re-inspect AFTER navigation so we can see what UG put there
-            info2 = await inspectOfficialTab(_scrapeTabId);
+            const polled = await pollForWikiContent(_scrapeTabId);
+            if (polled) data = polled;
+          }
+
+          // If UGAPP still never got the content, read it from the rendered DOM
+          if (!data?.tab_view?.wiki_tab?.content) {
+            const domData = await extractContentFromDom(_scrapeTabId);
+            if (domData?.tab_view?.wiki_tab?.content) data = domData;
           }
         }
 
-        // Strategy 2: click the Chords aria toggle (in-page React or navigation)
+        // Strategy 2 (no chords URL found): click the Chords aria toggle
         if (!data?.tab_view?.wiki_tab?.content) {
-          const { data: chordsData, clicked, newUrl } = await clickChordsAndWait(_scrapeTabId);
+          const { data: chordsData, newUrl } = await clickChordsAndWait(_scrapeTabId);
           if (chordsData) {
             data     = chordsData;
             finalUrl = (newUrl || finalUrl).split('?')[0];
-          } else {
-            const dbg = JSON.stringify({
-              clicked,
-              triedUrl:      chordsUrl,
-              before:        { wikiLen: info?.wikiLen, sniff: info?.chordContentFields, typeUrls: info?.typeUrls, currentUrl: info?.currentUrl },
-              after:         info2 ? { wikiLen: info2.wikiLen, sniff: info2.chordContentFields, typeUrls: info2.typeUrls, currentUrl: info2.currentUrl } : null,
-            });
-            throw new Error(`Official tab — no chords found. Debug: ${dbg}`);
           }
+        }
+
+        // Final DOM fallback on whatever page is loaded now
+        if (!data?.tab_view?.wiki_tab?.content) {
+          const domData = await extractContentFromDom(_scrapeTabId);
+          if (domData?.tab_view?.wiki_tab?.content) data = domData;
+        }
+
+        if (!data?.tab_view?.wiki_tab?.content) {
+          throw new Error(`Official tab — no chords found. typeUrls: ${JSON.stringify(info?.typeUrls)}, chordsUrl tried: ${chordsUrl}`);
         }
       }
 

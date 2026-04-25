@@ -326,30 +326,88 @@ function appendLog(status, msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Official-tab fallback — find the Chords version from the versions list
+// Official-tab fallback — find the Chords version
 // ---------------------------------------------------------------------------
 
 /**
- * Official tabs (e.g. -official-XXXXXX) show professional notation and have
- * empty wiki_tab.content.  The chord chart lives in a separate tab entry
- * (type "Chords") listed in tab_view.versions.  Return its URL, or null.
+ * Strategy 1: search the UGAPP page data deeply for any array that looks
+ * like a versions list and contains a Chords entry.
  */
-function findChordsUrl(data) {
-  const versions =
-    data?.tab_view?.versions ||
-    data?.versions           ||
-    data?.tab?.versions      || [];
-
-  if (!Array.isArray(versions) || versions.length === 0) return null;
-
-  // Prefer "Chords", fall back to "Tab"
+function _chordsFromArray(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
   const TYPE_PREF = { Chords: 0, Tab: 1 };
-  const sorted = [...versions].sort(
+  // Only treat this as a versions list if it has recognisable type fields
+  if (!arr.some(v => v && (v.type || v.type_name))) return null;
+  const sorted = [...arr].sort(
     (a, b) => (TYPE_PREF[a.type_name ?? a.type] ?? 99) -
                (TYPE_PREF[b.type_name ?? b.type] ?? 99)
   );
   const best = sorted[0];
-  return best?.tab_url || best?.url || null;
+  const u = best?.tab_url || best?.url;
+  return (u && !u.includes('-official-')) ? u : null;
+}
+
+function _findChordsDeep(obj, depth = 0) {
+  if (depth > 10 || !obj || typeof obj !== 'object') return null;
+  if (Array.isArray(obj)) {
+    const u = _chordsFromArray(obj);
+    if (u) return u;
+    for (const item of obj.slice(0, 30)) {
+      const r = _findChordsDeep(item, depth + 1);
+      if (r) return r;
+    }
+    return null;
+  }
+  // Prioritise keys that are likely to hold version lists
+  const priority = ['versions', 'tab_versions', 'other_versions', 'related_tabs', 'tabs'];
+  for (const k of priority) {
+    if (obj[k]) { const r = _findChordsDeep(obj[k], depth + 1); if (r) return r; }
+  }
+  for (const val of Object.values(obj)) {
+    const r = _findChordsDeep(val, depth + 1);
+    if (r) return r;
+  }
+  return null;
+}
+
+function findChordsUrlInData(data) {
+  return _findChordsDeep(data);
+}
+
+/**
+ * Strategy 2: look for chords-type links directly in the rendered DOM of
+ * the scrape tab (works even when UGAPP doesn't include a versions list).
+ */
+async function findChordsUrlInDom(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: () => {
+      // Any anchor whose href contains "-chords-" followed by digits
+      for (const a of document.querySelectorAll('a[href*="-chords-"]')) {
+        if (/\/tab\/[a-z0-9_-]+-chords-\d+/i.test(a.href))
+          return a.href.split('?')[0];
+      }
+      // Any anchor whose visible text is exactly "Chords"
+      for (const a of document.querySelectorAll('a[href*="/tab/"]')) {
+        if (a.textContent.trim().toLowerCase() === 'chords')
+          return a.href.split('?')[0];
+      }
+      // Dump top-level UGAPP keys so the dev can find the right path
+      const data = window.UGAPP?.store?.page?.data;
+      if (data) {
+        const tv = data.tab_view;
+        return '__DEBUG__:' + JSON.stringify({
+          topKeys:     Object.keys(data),
+          tabViewKeys: tv ? Object.keys(tv) : [],
+          versionsLen: tv?.versions?.length,
+          tabKeys:     data.tab ? Object.keys(data.tab) : [],
+        });
+      }
+      return null;
+    },
+  });
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,13 +423,27 @@ async function importUrls(urls, { btnEl } = {}) {
   for (const url of urls) {
     setProgress(done, urls.length);
     try {
-      // scrapeViaRealTab opens/reuses a real browser tab — Cloudflare can't block it
       let data     = await scrapeViaRealTab(url);
       let finalUrl = url;
 
-      // Official tabs have no wiki_tab.content — redirect to Chords version
+      // Official tabs have no wiki_tab.content — find the Chords version
       if (!data?.tab_view?.wiki_tab?.content) {
-        const chordsUrl = findChordsUrl(data);
+        // Strategy 1: deep search through UGAPP data
+        let chordsUrl = findChordsUrlInData(data);
+
+        // Strategy 2: scan the live DOM for chords-type links
+        if (!chordsUrl) {
+          const domResult = await findChordsUrlInDom(_scrapeTabId);
+          if (domResult && domResult.startsWith('__DEBUG__:')) {
+            // Log debug info so we can fix the data path next time
+            appendLog('fail', `Official tab — no chords link found. Debug: ${domResult.slice(9)}  [${url}]`);
+            done++;
+            setProgress(done, urls.length);
+            continue;
+          }
+          chordsUrl = domResult;
+        }
+
         if (chordsUrl && chordsUrl !== url) {
           data     = await scrapeViaRealTab(chordsUrl);
           finalUrl = chordsUrl;

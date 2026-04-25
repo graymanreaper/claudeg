@@ -1,10 +1,16 @@
 // ChordBook Grabber — popup script
+// Individual tab pages are scraped by navigating a real hidden browser tab
+// so Cloudflare treats every request as a normal user page load.
 
 const $ = (id) => document.getElementById(id);
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
 let serverUrl = 'http://localhost:5000';
 let currentTab = null;
 let currentTabData = null;
+
+// One persistent background tab is reused for all scraping; reset to null after import.
+let _scrapeTabId = null;
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -30,80 +36,97 @@ async function saveServerUrl() {
 async function pingServer() {
   const dot = $('serverStatus');
   try {
-    const r = await fetch(serverUrl + '/api/songs', { method: 'GET' });
+    const r = await fetch(serverUrl + '/api/songs');
     dot.className = r.ok ? 'dot dot-ok' : 'dot dot-off';
-    dot.title = r.ok ? 'Server reachable' : 'Server error ' + r.status;
+    dot.title     = r.ok ? 'Server reachable' : 'Server error ' + r.status;
   } catch {
     dot.className = 'dot dot-off';
-    dot.title = 'Server not reachable — is python app.py running?';
+    dot.title     = 'Server not reachable — is python app.py running?';
   }
 }
 
 // ---------------------------------------------------------------------------
-// JSON extraction helpers
+// Real-tab scraper (bypasses Cloudflare)
 // ---------------------------------------------------------------------------
 
-/** Read window.UGAPP.store.page.data directly from a live page. */
-async function readLivePageData(tabId) {
+/** Wait until a tab reaches 'complete' status, then pause for JS initialisation. */
+function waitForTabLoad(tabId, ms = 25000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      reject(new Error('Page load timed out'));
+    }, ms);
+
+    function onUpdated(id, info) {
+      if (id !== tabId || info.status !== 'complete') return;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      clearTimeout(timer);
+      setTimeout(resolve, 900); // let page JS (UGAPP) fully initialise
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+/** Clean up the scrape tab when we're done. */
+async function closeScrapeTab() {
+  if (_scrapeTabId != null) {
+    await chrome.tabs.remove(_scrapeTabId).catch(() => {});
+    _scrapeTabId = null;
+  }
+}
+
+// Track if user closes the scrape tab manually
+chrome.tabs.onRemoved.addListener(id => {
+  if (id === _scrapeTabId) _scrapeTabId = null;
+});
+
+/**
+ * Navigate the reusable background tab to `url`, wait for full load,
+ * then pull window.UGAPP.store.page.data via executeScript.
+ * This is a genuine browser request — Cloudflare cannot block it.
+ */
+async function scrapeViaRealTab(url) {
+  if (_scrapeTabId == null) {
+    const tab = await chrome.tabs.create({ url, active: false });
+    _scrapeTabId = tab.id;
+  } else {
+    // Check the tab still exists
+    const existing = await chrome.tabs.get(_scrapeTabId).catch(() => null);
+    if (!existing) {
+      const tab = await chrome.tabs.create({ url, active: false });
+      _scrapeTabId = tab.id;
+    } else {
+      await chrome.tabs.update(_scrapeTabId, { url });
+    }
+  }
+
+  await waitForTabLoad(_scrapeTabId);
+
   const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId: _scrapeTabId },
     world: 'MAIN',
     func: () => {
       const d = window.UGAPP?.store?.page?.data;
       return d ? JSON.parse(JSON.stringify(d)) : null;
     },
   });
+
+  if (!result) throw new Error('No tab data found — page may have failed to load');
   return result;
 }
 
-/** Extract the UGAPP JSON blob from raw HTML (brace-balanced parser). */
-function parseDataFromHtml(html) {
-  const marker = 'window.UGAPP.store.page.data = ';
-  const start = html.indexOf(marker);
-  if (start === -1) throw new Error('UGAPP data not found in page');
-  let i = start + marker.length;
-  while (i < html.length && html[i] !== '{') i++;
-  const jsonStart = i;
-  let depth = 0, inStr = false, esc = false;
-  for (; i < html.length; i++) {
-    const c = html[i];
-    if (esc) { esc = false; continue; }
-    if (c === '\\') { esc = true; continue; }
-    if (c === '"') { inStr = !inStr; continue; }
-    if (inStr) continue;
-    if (c === '{') depth++;
-    else if (c === '}' && --depth === 0) {
-      return JSON.parse(html.substring(jsonStart, i + 1));
-    }
-  }
-  throw new Error('Could not parse UGAPP JSON');
-}
-
-/** Fetch a UG URL using the browser's own session cookies. */
-async function fetchUgPage(url) {
-  const resp = await fetch(url, { credentials: 'include' });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} — ${url}`);
-  return parseDataFromHtml(await resp.text());
-}
-
-/** Fetch a UG URL and return the raw HTML (for DOM/regex fallback). */
-async function fetchHtml(url) {
-  const resp = await fetch(url, { credentials: 'include' });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.text();
-}
-
 // ---------------------------------------------------------------------------
-// Tab-data normaliser (for individual tab pages)
+// Tab-data normaliser
 // ---------------------------------------------------------------------------
 
 function normaliseTabData(data, urlFallback) {
-  const tab = data?.tab;
+  const tab  = data?.tab;
   const view = data?.tab_view;
   const content = view?.wiki_tab?.content;
   if (!content) throw new Error('No chord/tab content on this page');
   return {
-    url:      tab?.tab_url || urlFallback,
+    url:      tab?.tab_url    || urlFallback,
     title:    (tab?.song_name   || '').trim(),
     artist:   (tab?.artist_name || '').trim(),
     tab_type: tab?.type_name    || 'Chords',
@@ -116,19 +139,53 @@ function normaliseTabData(data, urlFallback) {
 }
 
 // ---------------------------------------------------------------------------
-// My Saved Tabs — multi-strategy URL extraction
+// My Saved Tabs — URL collection (www.ultimate-guitar.com, less restricted)
 // ---------------------------------------------------------------------------
 
 const TAB_URL_RE = /https:\/\/tabs\.ultimate-guitar\.com\/tab\/[a-z0-9_-]+\/[a-z0-9_-]+-\d+/gi;
 
-/** Walk any JS object tree looking for the first array that contains tab objects. */
+/** Read window.UGAPP.store.page.data from a live tab in MAIN world. */
+async function readLivePageData(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: () => {
+      const d = window.UGAPP?.store?.page?.data;
+      return d ? JSON.parse(JSON.stringify(d)) : null;
+    },
+  });
+  return result;
+}
+
+/** Extract the UGAPP JSON blob from raw HTML. */
+function parseDataFromHtml(html) {
+  const marker = 'window.UGAPP.store.page.data = ';
+  const start  = html.indexOf(marker);
+  if (start === -1) throw new Error('UGAPP data not found');
+  let i = start + marker.length;
+  while (i < html.length && html[i] !== '{') i++;
+  const jsonStart = i;
+  let depth = 0, inStr = false, esc = false;
+  for (; i < html.length; i++) {
+    const c = html[i];
+    if (esc)       { esc = false; continue; }
+    if (c === '\\') { esc = true;  continue; }
+    if (c === '"')  { inStr = !inStr; continue; }
+    if (inStr)      continue;
+    if (c === '{') depth++;
+    else if (c === '}' && --depth === 0)
+      return JSON.parse(html.substring(jsonStart, i + 1));
+  }
+  throw new Error('Could not parse UGAPP JSON');
+}
+
+/** Recursively find the first array of tab-like objects inside a JS object. */
 function findTabsDeep(obj, depth = 0) {
-  if (depth > 10 || obj === null || typeof obj !== 'object') return null;
+  if (depth > 10 || !obj || typeof obj !== 'object') return null;
   if (Array.isArray(obj)) {
     if (obj.length > 0 && typeof obj[0] === 'object' &&
-        (obj[0]?.tab_url || obj[0]?.tabUrl || obj[0]?.marketing_type)) {
+        (obj[0]?.tab_url || obj[0]?.tabUrl))
       return obj;
-    }
     for (const item of obj.slice(0, 20)) {
       const r = findTabsDeep(item, depth + 1);
       if (r) return r;
@@ -142,20 +199,12 @@ function findTabsDeep(obj, depth = 0) {
   return null;
 }
 
-/** Extract tab URLs from a page-data object, trying every known path + deep search. */
 function urlsFromPageData(data) {
   if (!data) return [];
-
-  // Hard-coded candidate paths (add new ones as UG changes their schema)
   const candidates = [
-    data?.tabs,
-    data?.data?.tabs,
-    data?.user_tabs,
-    data?.data?.user_tabs,
-    data?.data?.user_data?.tabs,
-    data?.store?.tabs,
-    data?.profile?.tabs,
-    data?.page?.tabs,
+    data?.tabs, data?.data?.tabs, data?.user_tabs,
+    data?.data?.user_tabs, data?.data?.user_data?.tabs,
+    data?.store?.tabs, data?.profile?.tabs, data?.page?.tabs,
   ];
   for (const arr of candidates) {
     if (Array.isArray(arr) && arr.length > 0) {
@@ -163,15 +212,12 @@ function urlsFromPageData(data) {
       if (urls.length) return urls;
     }
   }
-
-  // Deep recursive search
-  const found = findTabsDeep(data);
-  if (found) return found.map(t => t.tab_url || t.tabUrl || t.url).filter(Boolean);
-
+  const deep = findTabsDeep(data);
+  if (deep) return deep.map(t => t.tab_url || t.tabUrl || t.url).filter(Boolean);
   return [];
 }
 
-/** Pull tab URLs directly from the live page's DOM anchor tags. */
+/** Scrape tab URLs from the live page's DOM anchors. */
 async function urlsFromDom(tabId) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
@@ -179,10 +225,8 @@ async function urlsFromDom(tabId) {
     func: () => {
       const urls = new Set();
       document.querySelectorAll('a[href]').forEach(a => {
-        const h = a.href || '';
-        if (/tabs\.ultimate-guitar\.com\/tab\/[a-z0-9_-]+\/[a-z0-9_-]+-\d+/i.test(h)) {
-          urls.add(h.split('?')[0]);
-        }
+        if (/tabs\.ultimate-guitar\.com\/tab\/[a-z0-9_-]+\/[a-z0-9_-]+-\d+/i.test(a.href))
+          urls.add(a.href.split('?')[0]);
       });
       return [...urls];
     },
@@ -190,16 +234,7 @@ async function urlsFromDom(tabId) {
   return result || [];
 }
 
-/** Pull tab URLs from raw HTML via regex (last resort). */
-function urlsFromHtmlRegex(html) {
-  const found = new Set();
-  let m;
-  const re = new RegExp(TAB_URL_RE.source, 'gi');
-  while ((m = re.exec(html)) !== null) found.add(m[0]);
-  return [...found];
-}
-
-/** Detect the max page number from the live DOM (pagination links). */
+/** Detect max page number from pagination links in the live DOM. */
 async function detectTotalPages(tabId) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
@@ -216,50 +251,42 @@ async function detectTotalPages(tabId) {
   return result || 1;
 }
 
-/**
- * Master function: collect all saved-tab URLs across all pages.
- * Tries three strategies in order; whichever finds URLs first wins.
- */
+/** Collect all saved-tab URLs across every page of /user/mytabs. */
 async function getAllMyTabUrls(tabId) {
   const all = new Set();
 
-  // --- Strategy 1: window.UGAPP page data (fastest, cleanest) ---
+  // Page 1 — already loaded in browser
   let firstData = null;
   try { firstData = await readLivePageData(tabId); } catch {}
-  if (firstData) {
-    urlsFromPageData(firstData).forEach(u => all.add(u));
-  }
+  urlsFromPageData(firstData).forEach(u => all.add(u));
+  if (all.size === 0) (await urlsFromDom(tabId)).forEach(u => all.add(u));
 
-  // --- Strategy 2: DOM anchor scraping (works even if UGAPP is empty) ---
-  if (all.size === 0) {
-    const domUrls = await urlsFromDom(tabId);
-    domUrls.forEach(u => all.add(u));
-  }
-
-  // Figure out how many pages exist
+  // Pagination
   let totalPages = 1;
-  // Try page data first
   const pg = firstData?.pagination || firstData?.data?.pagination;
   if (pg) totalPages = pg.total ?? pg.last_page ?? 1;
-  // Fall back to DOM pagination links
   if (totalPages === 1) totalPages = await detectTotalPages(tabId);
 
-  // Fetch and parse additional pages
   for (let p = 2; p <= totalPages; p++) {
-    setProgress(all.size, all.size, `Loading page ${p} of ${totalPages}…`);
+    setProgress(all.size, all.size, `Collecting page ${p} of ${totalPages}…`);
     try {
-      const html = await fetchHtml(
-        `https://www.ultimate-guitar.com/user/mytabs?page=${p}`
+      const resp = await fetch(
+        `https://www.ultimate-guitar.com/user/mytabs?page=${p}`,
+        { credentials: 'include' }
       );
-      // Try UGAPP data first, then regex
-      let pageUrls = [];
-      try { pageUrls = urlsFromPageData(parseDataFromHtml(html)); } catch {}
-      if (!pageUrls.length) pageUrls = urlsFromHtmlRegex(html);
-      pageUrls.forEach(u => all.add(u));
+      const html = await resp.text();
+      let urls = [];
+      try { urls = urlsFromPageData(parseDataFromHtml(html)); } catch {}
+      if (!urls.length) {
+        const re = new RegExp(TAB_URL_RE.source, 'gi');
+        let m;
+        while ((m = re.exec(html)) !== null) urls.push(m[0]);
+      }
+      urls.forEach(u => all.add(u));
     } catch (e) {
       appendLog('fail', `Page ${p}: ${e.message}`);
     }
-    await delay(500);
+    await delay(400);
   }
 
   return [...all];
@@ -298,10 +325,8 @@ function appendLog(status, msg) {
   $('log').insertBefore(li, $('log').firstChild);
 }
 
-const delay = (ms) => new Promise(r => setTimeout(r, ms));
-
 // ---------------------------------------------------------------------------
-// Import a list of tab URLs
+// Core import loop — uses the real-tab scraper for every individual tab page
 // ---------------------------------------------------------------------------
 
 async function importUrls(urls, { btnEl } = {}) {
@@ -313,7 +338,8 @@ async function importUrls(urls, { btnEl } = {}) {
   for (const url of urls) {
     setProgress(done, urls.length);
     try {
-      const data   = await fetchUgPage(url);
+      // scrapeViaRealTab opens/reuses a real browser tab — Cloudflare can't block it
+      const data   = await scrapeViaRealTab(url);
       const tab    = normaliseTabData(data, url);
       const result = await postToServer(tab);
       appendLog(result.already_existed ? 'skip' : 'ok',
@@ -322,14 +348,12 @@ async function importUrls(urls, { btnEl } = {}) {
       appendLog('fail', `${e.message}  [${url}]`);
     }
     done++;
-    await delay(600);
+    setProgress(done, urls.length);
   }
 
+  await closeScrapeTab();
   setProgress(done, urls.length, `Done — ${done} tab${done !== 1 ? 's' : ''} processed.`);
-  if (btnEl) {
-    btnEl.disabled = false;
-    btnEl.textContent = btnEl.dataset.label;
-  }
+  if (btnEl) { btnEl.disabled = false; btnEl.textContent = btnEl.dataset.label; }
 }
 
 // ---------------------------------------------------------------------------
@@ -354,8 +378,7 @@ async function setupSingleTabMode(tab) {
 
 async function saveCurrentPage() {
   const btn = $('saveCurrentBtn');
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
+  btn.disabled = true; btn.textContent = 'Saving…';
   try {
     const result = await postToServer(currentTabData);
     btn.textContent = result.already_existed ? 'Already saved ✓' : 'Saved ✓';
@@ -374,52 +397,47 @@ async function setupMyTabsMode(tab) {
   const info = $('myTabsInfo');
   const btn  = $('importMyTabsBtn');
 
-  // Quick count preview using all three strategies
-  let count = 0;
-  let pages = 1;
   try {
     let data = null;
     try { data = await readLivePageData(tab.id); } catch {}
-
-    const fromData = data ? urlsFromPageData(data) : [];
+    const fromData = urlsFromPageData(data);
     const fromDom  = await urlsFromDom(tab.id);
-
-    count = Math.max(fromData.length, fromDom.length);
+    const count    = Math.max(fromData.length, fromDom.length);
 
     const pg = data?.pagination || data?.data?.pagination;
-    if (pg) pages = pg.total ?? pg.last_page ?? 1;
+    let pages = (pg?.total ?? pg?.last_page) || 1;
     if (pages === 1) pages = await detectTotalPages(tab.id);
-  } catch {}
 
-  if (count === 0 && pages === 1) {
-    info.textContent = 'Could not detect tabs yet — try scrolling the page down then clicking the extension icon again.';
+    if (count === 0) {
+      info.textContent = 'No tabs detected — try scrolling down to load the list, then reopen the extension.';
+      btn.disabled = true;
+    } else {
+      info.textContent = pages > 1
+        ? `Detected ${count} tabs on page 1 of ${pages} — all pages will be collected.`
+        : `Detected ${count} saved tabs.`;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    info.textContent = 'Error reading page: ' + e.message;
     btn.disabled = true;
-    return;
   }
-
-  info.textContent = pages > 1
-    ? `Detected ${count} tabs on page 1 of ${pages} — will collect all pages on import.`
-    : `Detected ${count} saved tabs.`;
-  btn.disabled = false;
 }
 
 async function importMyTabs() {
   const btn = $('importMyTabsBtn');
   btn.dataset.label = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'Collecting URLs…';
-  $('myTabsInfo').textContent = 'Scanning all pages…';
+  btn.disabled = true; btn.textContent = 'Collecting URLs…';
+  $('myTabsInfo').textContent = 'Scanning all pages for tab URLs…';
   $('log').innerHTML = '';
 
   try {
     const urls = await getAllMyTabUrls(currentTab.id);
     if (!urls.length) throw new Error('No tab URLs found on this page.');
-    $('myTabsInfo').textContent = `Found ${urls.length} tabs — importing…`;
+    $('myTabsInfo').textContent = `Found ${urls.length} tabs — importing (keep this popup open)…`;
     await importUrls(urls, { btnEl: btn });
   } catch (e) {
     appendLog('fail', e.message);
-    btn.disabled = false;
-    btn.textContent = btn.dataset.label;
+    btn.disabled = false; btn.textContent = btn.dataset.label;
   }
 }
 
@@ -429,8 +447,7 @@ async function importMyTabs() {
 
 async function bulkImport() {
   const lines = $('bulkUrls').value
-    .split('\n')
-    .map(s => s.trim())
+    .split('\n').map(s => s.trim())
     .filter(s => s && !s.startsWith('#') && s.startsWith('http'));
   if (!lines.length) return;
   const btn = $('bulkBtn');
@@ -439,7 +456,7 @@ async function bulkImport() {
 }
 
 // ---------------------------------------------------------------------------
-// Detect which UG page is active
+// Detect active page type and show the right section
 // ---------------------------------------------------------------------------
 
 async function detectPage() {

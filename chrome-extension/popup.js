@@ -330,88 +330,121 @@ function appendLog(status, msg) {
 // ---------------------------------------------------------------------------
 
 /**
- * Find the Chords-version URL from the UGAPP data of an Official tab page.
- *
- * Debug output confirmed these two fields exist in tab_view:
- *   - type_urls      : object mapping type name → URL  {"Chords":"https://..."}
- *   - brothers_by_type: object mapping type → array of sibling tab objects
- *
- * We prefer Chords, fall back to Tab, skip Official to avoid loops.
+ * Inject into the scrape tab and dump actual VALUES of the fields we care about.
+ * Returns a plain object so we can both act on it and log it.
  */
-function findChordsUrlInData(data) {
-  const tv = data?.tab_view;
-  if (!tv) return null;
+async function inspectOfficialTab(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: () => {
+      const d = window.UGAPP?.store?.page?.data;
+      if (!d) return null;
+      const tv = d.tab_view;
+      return {
+        wikiLen:         tv?.wiki_tab?.content?.length ?? 0,
+        simplifiedUrl:   tv?.simplifiedUrl   ?? null,
+        isSimplify:      tv?.is_simplify_available ?? false,
+        typeUrls:        tv?.type_urls        ?? null,   // actual object
+        brotherKeys:     tv?.brothers_by_type ? Object.keys(tv.brothers_by_type) : [],
+        versionsTypes:   (tv?.versions ?? []).map(v => v.type_name ?? v.type),
+        bestProTabUrl:   d?.best_pro_tab_url  ?? null,
+        songName:        d?.tab?.song_name    ?? '',
+        artistName:      d?.tab?.artist_name  ?? '',
+      };
+    },
+  });
+  return result;
+}
 
+/**
+ * Find a non-Official chords URL from whatever data the page exposes.
+ */
+function findChordsUrlInData(info) {
+  if (!info) return null;
   const TYPE_PREF = ['Chords', 'Tab'];
 
-  // ── type_urls ────────────────────────────────────────────────────────────
-  // Expected shape: { "Chords": "https://tabs.ug.com/tab/artist/song-chords-123", ... }
-  if (tv.type_urls && typeof tv.type_urls === 'object') {
+  // type_urls: { "Chords": "https://...", "Tab": "https://..." }
+  if (info.typeUrls && typeof info.typeUrls === 'object') {
     for (const t of TYPE_PREF) {
-      const u = tv.type_urls[t];
-      if (u && typeof u === 'string') return u.split('?')[0];
+      const u = info.typeUrls[t];
+      if (u && !u.includes('-official-')) return u.split('?')[0];
     }
   }
 
-  // ── brothers_by_type ─────────────────────────────────────────────────────
-  // Expected shape: { "Chords": [{ tab_url: "...", rating: 4.5 }, ...], ... }
-  if (tv.brothers_by_type && typeof tv.brothers_by_type === 'object') {
-    for (const t of TYPE_PREF) {
-      const arr = tv.brothers_by_type[t];
-      if (Array.isArray(arr) && arr.length > 0) {
-        const u = arr[0]?.tab_url || arr[0]?.url;
-        if (u) return u.split('?')[0];
-      }
-    }
-  }
+  // simplifiedUrl — a simpler chords view UG can render for official tabs
+  if (info.simplifiedUrl) return info.simplifiedUrl.split('?')[0];
 
   return null;
 }
 
 /**
- * Strategy 2 (definitive): click the "Chords" aria toggle in the live scrape
- * tab — exactly what the user does manually — then poll until React updates
- * window.UGAPP.store.page.data with the chord content.
- *
- * DevTools recording confirmed the button has aria-label="Chords" and is a
- * React in-page component (not a navigation link).
+ * Click the Chords aria toggle, then wait for either:
+ *  (a) wiki_tab.content to appear in UGAPP (in-page React update), OR
+ *  (b) the tab URL to change to a chords page (full navigation)
  */
-async function clickChordsToggleAndWait(tabId) {
-  // Click the Chords button
+async function clickChordsAndWait(tabId) {
+  const urlBefore = (await chrome.tabs.get(tabId).catch(() => ({url:''}))).url;
+
   const [{ result: clicked }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
     func: () => {
-      // Primary: aria-label (confirmed by DevTools recording)
-      const byAria = document.querySelector('[aria-label="Chords"]');
-      if (byAria) { byAria.click(); return 'aria'; }
+      // Try every plausible selector for the Chords toggle
+      const candidates = [
+        document.querySelector('[aria-label="Chords"]'),
+        document.querySelector('[aria-label="Chords"] span'),
+        ...[...document.querySelectorAll('*')].filter(
+          el => el.children.length === 0 && el.textContent.trim() === 'Chords'
+        ),
+      ].filter(Boolean);
 
-      // Fallback: any interactive element whose text is exactly "Chords"
-      for (const el of document.querySelectorAll('button,[role="tab"],[role="radio"],span')) {
-        if (el.textContent.trim() === 'Chords') { el.click(); return 'text'; }
-      }
-      return null;
+      if (!candidates.length) return null;
+
+      const el = candidates[0];
+      // Dispatch a full synthetic mouse-event sequence (React needs bubbling events)
+      ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t =>
+        el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, composed: true }))
+      );
+      return el.tagName + '|' + (el.getAttribute('aria-label') ?? el.textContent.trim());
     },
   });
 
-  if (!clicked) return null;
+  if (!clicked) return { data: null, clicked: false };
 
-  // Poll until wiki_tab.content is populated by React (up to ~5 seconds)
-  for (let i = 0; i < 10; i++) {
-    await delay(500);
-    const [{ result }] = await chrome.scripting.executeScript({
+  // Give React / navigation time to start
+  await delay(1500);
+
+  // Case A: URL changed — real navigation happened
+  const urlAfter = (await chrome.tabs.get(tabId).catch(() => ({url:urlBefore}))).url;
+  if (urlAfter !== urlBefore) {
+    await waitForTabLoad(tabId);
+    const [{ result: data }] = await chrome.scripting.executeScript({
       target: { tabId },
       world: 'MAIN',
       func: () => {
         const d = window.UGAPP?.store?.page?.data;
-        return d?.tab_view?.wiki_tab?.content
-          ? JSON.parse(JSON.stringify(d))
-          : null;
+        return d ? JSON.parse(JSON.stringify(d)) : null;
       },
     });
-    if (result) return result;
+    return { data, clicked: true, newUrl: urlAfter };
   }
-  return null; // timed out
+
+  // Case B: in-page React update — poll wiki_tab.content
+  for (let i = 0; i < 8; i++) {
+    await delay(500);
+    const [{ result: data }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        const d = window.UGAPP?.store?.page?.data;
+        return d?.tab_view?.wiki_tab?.content ? JSON.parse(JSON.stringify(d)) : null;
+      },
+    });
+    if (data) return { data, clicked: true };
+  }
+
+  return { data: null, clicked: true }; // click worked but content never appeared
 }
 
 // ---------------------------------------------------------------------------
@@ -430,24 +463,34 @@ async function importUrls(urls, { btnEl } = {}) {
       let data     = await scrapeViaRealTab(url);
       let finalUrl = url;
 
-      // Official tabs have no wiki_tab.content — find the Chords version
+      // Official tabs have no wiki_tab.content — find/load the Chords version
       if (!data?.tab_view?.wiki_tab?.content) {
-        // Strategy 1: type_urls / brothers_by_type in page data (fast, no extra load)
-        const chordsUrl = findChordsUrlInData(data);
+        const info = await inspectOfficialTab(_scrapeTabId);
+
+        // Strategy 1: URL redirect via type_urls or simplifiedUrl
+        const chordsUrl = findChordsUrlInData(info);
         if (chordsUrl && chordsUrl !== url) {
           data     = await scrapeViaRealTab(chordsUrl);
           finalUrl = chordsUrl;
         }
 
-        // Strategy 2: click the "Chords" aria toggle and wait for React to update
-        // (mirrors exactly what the user does — confirmed via DevTools recording)
+        // Strategy 2: click the Chords aria toggle (in-page React or navigation)
         if (!data?.tab_view?.wiki_tab?.content) {
-          const chordsData = await clickChordsToggleAndWait(_scrapeTabId);
+          const { data: chordsData, clicked, newUrl } = await clickChordsAndWait(_scrapeTabId);
           if (chordsData) {
-            data = chordsData;
-            // URL may have changed; read the actual current tab URL
-            const liveTab = await chrome.tabs.get(_scrapeTabId).catch(() => null);
-            if (liveTab?.url) finalUrl = liveTab.url.split('?')[0];
+            data     = chordsData;
+            finalUrl = (newUrl || finalUrl).split('?')[0];
+          } else {
+            // Log actionable debug so we can see exactly what's available
+            const dbg = JSON.stringify({
+              clicked,
+              typeUrls:      info?.typeUrls,
+              simplifiedUrl: info?.simplifiedUrl,
+              brotherKeys:   info?.brotherKeys,
+              versionsTypes: info?.versionsTypes,
+              bestProTabUrl: info?.bestProTabUrl,
+            });
+            throw new Error(`Official tab — no chords found. Debug: ${dbg}`);
           }
         }
       }

@@ -362,17 +362,20 @@ async function inspectOfficialTab(tabId) {
  */
 function findChordsUrlInData(info) {
   if (!info) return null;
-  const TYPE_PREF = ['Chords', 'Tab'];
 
-  // type_urls: { "Chords": "https://...", "Tab": "https://..." }
+  // type_urls keys are lowercase from UG: { chords: "...", pro: "...", tab: "..." }
   if (info.typeUrls && typeof info.typeUrls === 'object') {
-    for (const t of TYPE_PREF) {
-      const u = info.typeUrls[t];
-      if (u && !u.includes('-official-')) return u.split('?')[0];
+    const entries = Object.entries(info.typeUrls);
+    // Prefer the 'chords' key (case-insensitive) — it's the simplified chord view
+    for (const [k, u] of entries) {
+      if (k.toLowerCase() === 'chords' && u) return u.split('?')[0];
+    }
+    // Fall back to any key that isn't the pro/official notation tab
+    for (const [k, u] of entries) {
+      if (u && !['pro', 'official'].includes(k.toLowerCase())) return u.split('?')[0];
     }
   }
 
-  // simplifiedUrl — a simpler chords view UG can render for official tabs
   if (info.simplifiedUrl) return info.simplifiedUrl.split('?')[0];
 
   return null;

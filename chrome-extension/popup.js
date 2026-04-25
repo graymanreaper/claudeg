@@ -330,48 +330,42 @@ function appendLog(status, msg) {
 // ---------------------------------------------------------------------------
 
 /**
- * Strategy 1: search the UGAPP page data deeply for any array that looks
- * like a versions list and contains a Chords entry.
+ * Find the Chords-version URL from the UGAPP data of an Official tab page.
+ *
+ * Debug output confirmed these two fields exist in tab_view:
+ *   - type_urls      : object mapping type name → URL  {"Chords":"https://..."}
+ *   - brothers_by_type: object mapping type → array of sibling tab objects
+ *
+ * We prefer Chords, fall back to Tab, skip Official to avoid loops.
  */
-function _chordsFromArray(arr) {
-  if (!Array.isArray(arr) || arr.length === 0) return null;
-  const TYPE_PREF = { Chords: 0, Tab: 1 };
-  // Only treat this as a versions list if it has recognisable type fields
-  if (!arr.some(v => v && (v.type || v.type_name))) return null;
-  const sorted = [...arr].sort(
-    (a, b) => (TYPE_PREF[a.type_name ?? a.type] ?? 99) -
-               (TYPE_PREF[b.type_name ?? b.type] ?? 99)
-  );
-  const best = sorted[0];
-  const u = best?.tab_url || best?.url;
-  return (u && !u.includes('-official-')) ? u : null;
-}
-
-function _findChordsDeep(obj, depth = 0) {
-  if (depth > 10 || !obj || typeof obj !== 'object') return null;
-  if (Array.isArray(obj)) {
-    const u = _chordsFromArray(obj);
-    if (u) return u;
-    for (const item of obj.slice(0, 30)) {
-      const r = _findChordsDeep(item, depth + 1);
-      if (r) return r;
-    }
-    return null;
-  }
-  // Prioritise keys that are likely to hold version lists
-  const priority = ['versions', 'tab_versions', 'other_versions', 'related_tabs', 'tabs'];
-  for (const k of priority) {
-    if (obj[k]) { const r = _findChordsDeep(obj[k], depth + 1); if (r) return r; }
-  }
-  for (const val of Object.values(obj)) {
-    const r = _findChordsDeep(val, depth + 1);
-    if (r) return r;
-  }
-  return null;
-}
-
 function findChordsUrlInData(data) {
-  return _findChordsDeep(data);
+  const tv = data?.tab_view;
+  if (!tv) return null;
+
+  const TYPE_PREF = ['Chords', 'Tab'];
+
+  // ── type_urls ────────────────────────────────────────────────────────────
+  // Expected shape: { "Chords": "https://tabs.ug.com/tab/artist/song-chords-123", ... }
+  if (tv.type_urls && typeof tv.type_urls === 'object') {
+    for (const t of TYPE_PREF) {
+      const u = tv.type_urls[t];
+      if (u && typeof u === 'string') return u.split('?')[0];
+    }
+  }
+
+  // ── brothers_by_type ─────────────────────────────────────────────────────
+  // Expected shape: { "Chords": [{ tab_url: "...", rating: 4.5 }, ...], ... }
+  if (tv.brothers_by_type && typeof tv.brothers_by_type === 'object') {
+    for (const t of TYPE_PREF) {
+      const arr = tv.brothers_by_type[t];
+      if (Array.isArray(arr) && arr.length > 0) {
+        const u = arr[0]?.tab_url || arr[0]?.url;
+        if (u) return u.split('?')[0];
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -434,14 +428,8 @@ async function importUrls(urls, { btnEl } = {}) {
         // Strategy 2: scan the live DOM for chords-type links
         if (!chordsUrl) {
           const domResult = await findChordsUrlInDom(_scrapeTabId);
-          if (domResult && domResult.startsWith('__DEBUG__:')) {
-            // Log debug info so we can fix the data path next time
-            appendLog('fail', `Official tab — no chords link found. Debug: ${domResult.slice(9)}  [${url}]`);
-            done++;
-            setProgress(done, urls.length);
-            continue;
-          }
-          chordsUrl = domResult;
+          chordsUrl = (domResult && !domResult.startsWith('__DEBUG__:'))
+            ? domResult : null;
         }
 
         if (chordsUrl && chordsUrl !== url) {

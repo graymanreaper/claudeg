@@ -326,6 +326,33 @@ function appendLog(status, msg) {
 }
 
 // ---------------------------------------------------------------------------
+// Official-tab fallback — find the Chords version from the versions list
+// ---------------------------------------------------------------------------
+
+/**
+ * Official tabs (e.g. -official-XXXXXX) show professional notation and have
+ * empty wiki_tab.content.  The chord chart lives in a separate tab entry
+ * (type "Chords") listed in tab_view.versions.  Return its URL, or null.
+ */
+function findChordsUrl(data) {
+  const versions =
+    data?.tab_view?.versions ||
+    data?.versions           ||
+    data?.tab?.versions      || [];
+
+  if (!Array.isArray(versions) || versions.length === 0) return null;
+
+  // Prefer "Chords", fall back to "Tab"
+  const TYPE_PREF = { Chords: 0, Tab: 1 };
+  const sorted = [...versions].sort(
+    (a, b) => (TYPE_PREF[a.type_name ?? a.type] ?? 99) -
+               (TYPE_PREF[b.type_name ?? b.type] ?? 99)
+  );
+  const best = sorted[0];
+  return best?.tab_url || best?.url || null;
+}
+
+// ---------------------------------------------------------------------------
 // Core import loop — uses the real-tab scraper for every individual tab page
 // ---------------------------------------------------------------------------
 
@@ -339,8 +366,19 @@ async function importUrls(urls, { btnEl } = {}) {
     setProgress(done, urls.length);
     try {
       // scrapeViaRealTab opens/reuses a real browser tab — Cloudflare can't block it
-      const data   = await scrapeViaRealTab(url);
-      const tab    = normaliseTabData(data, url);
+      let data     = await scrapeViaRealTab(url);
+      let finalUrl = url;
+
+      // Official tabs have no wiki_tab.content — redirect to Chords version
+      if (!data?.tab_view?.wiki_tab?.content) {
+        const chordsUrl = findChordsUrl(data);
+        if (chordsUrl && chordsUrl !== url) {
+          data     = await scrapeViaRealTab(chordsUrl);
+          finalUrl = chordsUrl;
+        }
+      }
+
+      const tab    = normaliseTabData(data, finalUrl);
       const result = await postToServer(tab);
       appendLog(result.already_existed ? 'skip' : 'ok',
                 `${tab.title} — ${tab.artist}`);

@@ -339,18 +339,36 @@ async function inspectOfficialTab(tabId) {
     world: 'MAIN',
     func: () => {
       const d = window.UGAPP?.store?.page?.data;
-      if (!d) return null;
+      if (!d) return { error: 'no UGAPP', currentUrl: location.href };
       const tv = d.tab_view;
+      // Sniff every candidate content field anywhere under tab_view
+      const sniff = {};
+      function walk(o, path, depth) {
+        if (!o || depth > 4 || typeof o !== 'object') return;
+        for (const [k, v] of Object.entries(o)) {
+          if (typeof v === 'string' && v.length > 80 &&
+              (/\[ch\]|\[tab\]|\[Verse|\[Chorus|\[Intro/i.test(v))) {
+            sniff[`${path}.${k}`] = v.length;
+          } else if (typeof v === 'object') {
+            walk(v, path + '.' + k, depth + 1);
+          }
+        }
+      }
+      if (tv) walk(tv, 'tab_view', 0);
+
       return {
+        currentUrl:      location.href,
         wikiLen:         tv?.wiki_tab?.content?.length ?? 0,
         simplifiedUrl:   tv?.simplifiedUrl   ?? null,
         isSimplify:      tv?.is_simplify_available ?? false,
-        typeUrls:        tv?.type_urls        ?? null,   // actual object
+        typeUrls:        tv?.type_urls        ?? null,
+        tabType:         d?.tab?.type_name    ?? null,
         brotherKeys:     tv?.brothers_by_type ? Object.keys(tv.brothers_by_type) : [],
         versionsTypes:   (tv?.versions ?? []).map(v => v.type_name ?? v.type),
         bestProTabUrl:   d?.best_pro_tab_url  ?? null,
         songName:        d?.tab?.song_name    ?? '',
         artistName:      d?.tab?.artist_name  ?? '',
+        chordContentFields: sniff,
       };
     },
   });
@@ -469,12 +487,17 @@ async function importUrls(urls, { btnEl } = {}) {
       // Official tabs have no wiki_tab.content — find/load the Chords version
       if (!data?.tab_view?.wiki_tab?.content) {
         const info = await inspectOfficialTab(_scrapeTabId);
+        let info2 = null;
 
         // Strategy 1: URL redirect via type_urls or simplifiedUrl
         const chordsUrl = findChordsUrlInData(info);
         if (chordsUrl && chordsUrl !== url) {
           data     = await scrapeViaRealTab(chordsUrl);
           finalUrl = chordsUrl;
+          if (!data?.tab_view?.wiki_tab?.content) {
+            // Re-inspect AFTER navigation so we can see what UG put there
+            info2 = await inspectOfficialTab(_scrapeTabId);
+          }
         }
 
         // Strategy 2: click the Chords aria toggle (in-page React or navigation)
@@ -484,14 +507,11 @@ async function importUrls(urls, { btnEl } = {}) {
             data     = chordsData;
             finalUrl = (newUrl || finalUrl).split('?')[0];
           } else {
-            // Log actionable debug so we can see exactly what's available
             const dbg = JSON.stringify({
               clicked,
-              typeUrls:      info?.typeUrls,
-              simplifiedUrl: info?.simplifiedUrl,
-              brotherKeys:   info?.brotherKeys,
-              versionsTypes: info?.versionsTypes,
-              bestProTabUrl: info?.bestProTabUrl,
+              triedUrl:      chordsUrl,
+              before:        { wikiLen: info?.wikiLen, sniff: info?.chordContentFields, typeUrls: info?.typeUrls, currentUrl: info?.currentUrl },
+              after:         info2 ? { wikiLen: info2.wikiLen, sniff: info2.chordContentFields, typeUrls: info2.typeUrls, currentUrl: info2.currentUrl } : null,
             });
             throw new Error(`Official tab — no chords found. Debug: ${dbg}`);
           }

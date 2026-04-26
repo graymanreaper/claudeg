@@ -1,8 +1,10 @@
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / 'songs.db'
+DB_PATH = Path(os.environ.get('CHORDBOOK_DB',
+                              Path(__file__).parent / 'songs.db'))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS songs (
